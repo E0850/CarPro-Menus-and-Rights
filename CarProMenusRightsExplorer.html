@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CarPro Menu Rights Explorer</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 16px; }
+  .toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom: 12px; }
+  #search { padding:6px 8px; min-width: 260px; }
+  select, button { padding:6px 8px; }
+  ul { list-style: none; padding-left: 18px; margin: 2px 0; }
+  li { margin: 2px 0; }
+  .row { display:flex; align-items:center; gap:8px; }
+  .node { cursor: pointer; user-select:none; color:#000; }
+  /* Blue for nodes that have submenus (branch nodes), black for last level (leaf nodes) */
+  .node.branch { color:#0b57d0; }
+  .node.leaf { color:#000; }
+  .path { color:#666; font-size: 12px; margin-left: 6px; }
+  .badge { font-size: 12px; padding: 1px 6px; border-radius: 10px; }
+  .enabled { background:#e7f7ec; color:#0b6b2a; border:1px solid #bfe7cb; }
+  .disabled { background:#fdeaea; color:#8a1f1f; border:1px solid #f3c1c1; }
+  .collapsed > ul { display:none; }
+  .dim { opacity: 0.35; }
+  .hint { color:#444; font-size: 12px; }
+
+/* Freeze the toolbar (Excel-like freeze pane) */
+.toolbar {
+  display:flex; 
+  gap:12px; 
+  align-items:center; 
+  flex-wrap:wrap; 
+  margin-bottom: 12px; 
+}
+
+/* ✅ ADD HERE */
+:root { --tb-w: 300px; --tb-h: 32px; }
+
+.toolbar input[type="text"]{
+  width: var(--tb-w);
+  height: var(--tb-h);
+  box-sizing: border-box;
+  padding: 6px 8px;
+}
+
+/* Keep select/buttons visually aligned in height */
+.toolbar select, .toolbar button{
+  height: var(--tb-h);
+  box-sizing: border-box;
+  padding: 6px 8px;
+}
+
+/* Optional: also keep the status line visible under the toolbar */
+#status {
+  position: sticky;
+  top: 56px;        /* adjust if toolbar height changes */
+  z-index: 998;
+  background: #fff;
+  padding: 6px 0;
+  border-bottom: 1px solid #eee;
+}
+
+/* Freeze whole top pane */
+.topPane {
+  position: sticky;
+  top: 0;
+  z-index: 999;
+  background: #fff;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #ccc;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+}
+
+/* Zebra rows for readability */
+#tree li:nth-child(odd) > .row {
+  background: #fafafa;
+}
+
+#tree li:nth-child(even) > .row {
+  background: #f0f4f8;
+}
+
+/* Hover highlight */
+.row:hover {
+  background: #dcecff !important;
+}
+
+
+
+/* ===== Branch hover actions (clean, no layout shift) ===== */
+.labelWrap{
+  display: inline-flex;
+  align-items: center;
+}
+.actions{
+  display: inline-flex;
+  gap: 6px;
+  overflow: hidden;
+  max-width: 0;
+  opacity: 0;
+  transform: translateY(-1px);
+  margin-left: 0;
+  pointer-events: none;
+  transition: max-width 180ms ease, opacity 160ms ease, transform 160ms ease, margin-left 180ms ease;
+}
+/* Show actions when hovering the blue text OR when hovering the buttons themselves */
+.labelWrap .node.branch:hover + .actions,
+.labelWrap:hover .actions,
+.actions:hover,
+.actions:focus-within{
+  max-width: 80px;
+  opacity: 1;
+  transform: translateY(0);
+  margin-left: 6px;
+  pointer-events: auto;
+}
+/* Compact icon buttons (override global button padding) */
+.actions .miniBtn{
+  width: 24px;
+  height: 22px;
+  padding: 0 !important;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+  border: 1px solid #c7dafb;
+  background: #f3f8ff;
+  color: #0b57d0;
+  cursor: pointer;
+}
+.actions .miniBtn:hover{ background: #e7f0ff; }
+.actions .miniBtn.secondary{
+  border-color: #d8d8d8;
+  background: #f6f6f6;
+  color: #333;
+}
+.actions .miniBtn.secondary:hover{ background:#ededed; }
+
+/* Keep path/badge from wrapping weirdly */
+.path{ white-space: nowrap; }
+.badge{ white-space: nowrap; }
+
+</style>
+</head>
+<body>
+  <div class="topPane">
+  <div class="toolbar">
+    <label>
+      Group:
+      <select id="groupSelect"></select>
+    </label>
+    <label>
+      Group search:
+      <input id="groupFilter" type="text" placeholder="Type to filter groups..." />
+    </label>
+    <input id="search" type="text" placeholder="Search menu..." />
+    <label style="display:flex;align-items:center;gap:6px;">
+      <input type="checkbox" id="showDisabled" checked />
+      Show disabled too
+    </label>
+    <button id="expandAll">Expand all</button>
+    <button id="collapseAll">Collapse all</button>
+    <button id="download">Download changes (JSON)</button>
+    <span class="hint">Tip: tick/untick to enable/disable a menu path for the selected group.</span>
+  </div>
+
+  <div id="status" class="hint"></div>
+  </div>
+  <ul id="tree"></ul>
+
+<script>
+let MENU_TREE = [];
+let GROUP_ACCESS = {};
+let CURRENT_GROUP = null;
+let edits = {}; // { group: Set(paths) }
+let ALL_GROUPS = []; // full group list (sorted)
+let EXPANDED = new Set(); // expanded branch paths (persist across rerenders)
+
+
+function sortPaths(a,b){
+  const pa=a.split('.').map(x=>isFinite(x)?Number(x):x);
+  const pb=b.split('.').map(x=>isFinite(x)?Number(x):x);
+  const n=Math.max(pa.length,pb.length);
+  for(let i=0;i<n;i++){
+    if(pa[i]===undefined) return -1;
+    if(pb[i]===undefined) return 1;
+    if(pa[i]===pb[i]) continue;
+    return pa[i] > pb[i] ? 1 : -1;
+  }
+  return 0;
+}
+
+function getCurrentSet(){
+  if(!CURRENT_GROUP) return new Set();
+  if(!edits[CURRENT_GROUP]){
+    edits[CURRENT_GROUP] = new Set(GROUP_ACCESS[CURRENT_GROUP] || []);
+  }
+  return edits[CURRENT_GROUP];
+}
+
+function updateStatus(){
+  const statusEl = document.getElementById('status');
+  if(!CURRENT_GROUP){
+    statusEl.textContent = 'No group selected (group search returned no matches).';
+    return;
+  }
+  const set=getCurrentSet();
+  statusEl.textContent = `Group "${CURRENT_GROUP}" has ${set.size} enabled menu paths (including parents).`;
+}
+
+function hasAnyEnabledDescendant(node, enabledSet){
+  if(!node || !node.children || node.children.length===0) return false;
+  return node.children.some(ch => enabledSet.has(ch.path) || hasAnyEnabledDescendant(ch, enabledSet));
+}
+
+function renderTree(){
+  const set=getCurrentSet();
+  const q=document.getElementById('search').value.trim().toLowerCase();
+  const container=document.getElementById('tree');
+  container.innerHTML = '';
+
+  function matches(node){
+    if(!q) return true;
+    if((node.name||'').toLowerCase().includes(q)) return true;
+    if((node.path||'').toLowerCase().includes(q)) return true;
+    return (node.children||[]).some(matches);
+  }
+
+  function build(node){
+    const showDisabled = document.getElementById('showDisabled') ? document.getElementById('showDisabled').checked : true;
+
+    // If showDisabled is OFF => show only enabled nodes (and parents of enabled nodes)
+    if(!showDisabled){
+      const enabled = set.has(node.path);
+      const hasEnabledChild = hasAnyEnabledDescendant(node, set);
+      if(!enabled && !hasEnabledChild){
+        return null;
+      }
+    }
+    const li=document.createElement('li');
+    const isBranch = (node.children && node.children.length);
+    if(isBranch && !EXPANDED.has(node.path)) li.classList.add('collapsed');
+
+    const row=document.createElement('div');
+    row.className='row';
+
+    const checkbox=document.createElement('input');
+    checkbox.type='checkbox';
+    checkbox.checked = set.has(node.path);
+    checkbox.addEventListener('change', ()=>{
+      const s=getCurrentSet();
+      if(checkbox.checked){
+        // enable node + parents
+        s.add(node.path);
+        const parts=node.path.split('.');
+        for(let i=1;i<parts.length;i++) s.add(parts.slice(0,i).join('.'));
+      }else{
+        // disable node + all descendants
+        disableNodeAndDesc(node, getCurrentSet());
+      }
+      updateStatus();
+      renderTree();
+    });
+
+    const labelWrap=document.createElement('span');
+    labelWrap.className='labelWrap';
+
+    const label=document.createElement('span');
+    label.className='node ' + (isBranch ? 'branch' : 'leaf');
+    label.textContent = node.name;
+
+    // Expand/collapse only when clicking the label text (branch nodes only)
+    label.addEventListener('click', (e)=>{
+      if(!isBranch) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if(EXPANDED.has(node.path)) EXPANDED.delete(node.path);
+      else EXPANDED.add(node.path);
+      li.classList.toggle('collapsed');
+      console.log('Clicked:', node.name, 'path:', node.path);
+    });
+
+    labelWrap.appendChild(label);
+
+    // Per-branch bulk actions (show on hover)
+    if(isBranch){
+      const actions=document.createElement('span');
+      actions.className='actions';
+
+      const btnSelectAll=document.createElement('button');
+      btnSelectAll.type='button';
+      btnSelectAll.className='miniBtn';
+      btnSelectAll.innerHTML='✔';
+      btnSelectAll.title='Select all (enable all under this branch)';
+      btnSelectAll.setAttribute('aria-label','Select all');
+
+      const btnUnselectAll=document.createElement('button');
+      btnUnselectAll.type='button';
+      btnUnselectAll.className='miniBtn secondary';
+      btnUnselectAll.innerHTML='✖';
+      btnUnselectAll.title='Unselect all (disable all under this branch)';
+      btnUnselectAll.setAttribute('aria-label','Unselect all');
+
+      // Hard-stop bubbling so clicking icons never toggles collapse
+      for(const b of [btnSelectAll, btnUnselectAll]){
+        b.addEventListener('pointerdown', (e)=>{ e.preventDefault(); e.stopPropagation(); });
+        b.addEventListener('mousedown', (e)=>{ e.preventDefault(); e.stopPropagation(); });
+        b.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); });
+        b.addEventListener('pointerup', (e)=>{ e.preventDefault(); e.stopPropagation(); });
+      }
+      actions.addEventListener('pointerdown', (e)=>{ e.preventDefault(); e.stopPropagation(); });
+      actions.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); });
+
+      btnSelectAll.addEventListener('click', ()=>{
+        const s=getCurrentSet();
+        enableNodeAndDesc(node, s);
+        updateStatus();
+        renderTree();
+      });
+
+      btnUnselectAll.addEventListener('click', ()=>{
+        disableNodeAndDesc(node, getCurrentSet());
+        updateStatus();
+        renderTree();
+      });
+
+      actions.appendChild(btnSelectAll);
+      actions.appendChild(btnUnselectAll);
+      labelWrap.appendChild(actions);
+    }
+
+    const path=document.createElement('span');
+    path.className='path';
+    path.textContent = node.path;
+
+    const badge=document.createElement('span');
+    badge.className='badge ' + (set.has(node.path) ? 'enabled' : 'disabled');
+    badge.textContent = set.has(node.path) ? 'ENABLED' : 'DISABLED';
+
+    row.appendChild(checkbox);
+    row.appendChild(labelWrap);
+    row.appendChild(path);
+
+    // spacer pushes ENABLED/DISABLED badge to far right
+    const spacer=document.createElement('div');
+    spacer.style.flex='1';
+    row.appendChild(spacer);
+
+    row.appendChild(badge);
+
+    li.appendChild(row);
+
+    if(node.children && node.children.length){
+      const ul=document.createElement('ul');
+      node.children.forEach(ch=>{
+        if(matches(ch)) {
+          const childEl = build(ch);
+          if(childEl) ul.appendChild(childEl);
+        }
+      });
+      if(ul.childNodes.length===0 && q){
+        // if searching and none match, hide
+        li.classList.add('dim');
+      }
+      li.appendChild(ul);
+    }
+
+    // hide nodes that don't match search at all
+    if(q && !matches(node)) li.style.display='none';
+    return li;
+  }
+
+  MENU_TREE.forEach(root=>{
+    if(matches(root)) {
+    const rootEl = build(root);
+    if(rootEl) container.appendChild(rootEl);
+  }
+  });
+}
+
+function disableNodeAndDesc(node, set){
+  set.delete(node.path);
+  (node.children||[]).forEach(ch=>disableNodeAndDesc(ch,set));
+}
+
+function enableNodeAndDesc(node, set){
+  // enable node + all descendants + ensure parents are enabled
+  set.add(node.path);
+  const parts = node.path.split('.');
+  for(let i=1;i<parts.length;i++) set.add(parts.slice(0,i).join('.'));
+  (node.children||[]).forEach(ch=>enableNodeAndDesc(ch,set));
+}
+
+function expandCollapse(allCollapsed){
+  if(allCollapsed){
+    EXPANDED.clear();
+  }else{
+    // expand all branches
+    EXPANDED.clear();
+    (function walk(nodes){
+      (nodes||[]).forEach(n=>{
+        if(n.children && n.children.length){
+          EXPANDED.add(n.path);
+          walk(n.children);
+        }
+      });
+    })(MENU_TREE);
+  }
+  renderTree();
+}
+
+function downloadJson(){
+  const out={};
+  for(const g of Object.keys(GROUP_ACCESS)){
+    const s = edits[g] ? Array.from(edits[g]) : (GROUP_ACCESS[g] || []);
+    // only keep real nodes enabled by user (including parents) - ok for UI
+    out[g]=s.sort(sortPaths);
+  }
+  const blob=new Blob([JSON.stringify(out,null,2)], {type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='group_access_updated.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function populateGroupSelect(filterText=''){
+  const sel = document.getElementById('groupSelect');
+  const f = (filterText||'').trim().toLowerCase();
+  const groups = !f ? ALL_GROUPS : ALL_GROUPS.filter(g => g.toLowerCase().includes(f));
+  sel.innerHTML = '';
+  groups.forEach(g => {
+    const opt = document.createElement('option');
+    opt.value = g;
+    opt.textContent = g;
+    sel.appendChild(opt);
+  });
+  if(groups.length===0){
+    CURRENT_GROUP = null;
+    return;
+  }
+  // Keep current selection if it still exists; otherwise pick the first match
+  if(!CURRENT_GROUP || !groups.includes(CURRENT_GROUP)) CURRENT_GROUP = groups[0];
+  sel.value = CURRENT_GROUP;
+}
+
+async function init(){
+  MENU_TREE = await fetch('menus_full.json').then(r=>r.json());
+  GROUP_ACCESS = await fetch('group_access.json').then(r=>r.json());
+
+  const sel=document.getElementById('groupSelect');
+  ALL_GROUPS = Object.keys(GROUP_ACCESS).sort();
+  populateGroupSelect('');
+  sel.addEventListener('change', ()=>{
+    CURRENT_GROUP = sel.value;
+    updateStatus();
+    renderTree();
+  });
+
+  // Group search (filters the dropdown in real time)
+  const gf = document.getElementById('groupFilter');
+  if(gf){
+    gf.addEventListener('input', ()=>{
+      const prev = CURRENT_GROUP;
+      populateGroupSelect(gf.value);
+      // If filtering changed the selected group, refresh UI
+      if(prev !== CURRENT_GROUP){
+        updateStatus();
+        renderTree();
+      }else{
+        // still update status if CURRENT_GROUP became null (no matches)
+        updateStatus();
+        renderTree();
+      }
+    });
+    gf.addEventListener('keydown', (e)=>{
+      if(e.key === 'Enter'){
+        e.preventDefault();
+        // On Enter, if there is exactly one match, select it
+        const f = (gf.value||'').trim().toLowerCase();
+        const matches = !f ? ALL_GROUPS : ALL_GROUPS.filter(g => g.toLowerCase().includes(f));
+        if(matches.length===1){
+          CURRENT_GROUP = matches[0];
+          populateGroupSelect(gf.value);
+          updateStatus();
+          renderTree();
+          sel.focus();
+        }
+      }
+    });
+  }
+
+  document.getElementById('search').addEventListener('input', renderTree);
+  document.getElementById('showDisabled').addEventListener('change', renderTree); // <-- ADD THIS LINE
+  document.getElementById('expandAll').addEventListener('click', ()=>expandCollapse(false));  
+  document.getElementById('collapseAll').addEventListener('click', ()=>expandCollapse(true));
+  document.getElementById('download').addEventListener('click', downloadJson);
+
+  updateStatus();
+  renderTree();
+}
+
+init();
+</script>
+</body>
+</html>
