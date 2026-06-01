@@ -139,7 +139,37 @@
 .path{ white-space: nowrap; }
 .badge{ white-space: nowrap; }
 
+
+/* Modern toolbar buttons with icons */
+button{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+  border-radius:6px;
+  border:1px solid #cfd6e4;
+  background:#f8f9fb;
+  color:#1f2937;
+  cursor:pointer;
+  transition:all .2s ease;
+}
+button i{ font-size:14px; }
+button:hover{
+  background:#e7f0ff;
+  border-color:#0b57d0;
+  color:#0b57d0;
+}
+button:focus-visible{
+  outline:2px solid #0b57d0;
+  outline-offset:2px;
+}
+/* Toolbar icon-only buttons */
+.toolbar button{
+  min-width:34px;
+}
+
 </style>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
 </head>
 <body>
   <div class="topPane">
@@ -157,8 +187,9 @@
       <input type="checkbox" id="showDisabled" checked />
       Show disabled too
     </label>
-    <button id="toggleExpandCollapse">Expand all</button>
-    <button id="download">Download changes (JSON)</button>
+    <button id="expandAll" title="Expand all" aria-label="Expand all"><i class="fa-solid fa-angles-down"></i></button>
+    <button id="collapseAll" title="Collapse all" aria-label="Collapse all"><i class="fa-solid fa-angles-up"></i></button>
+    <button id="download" title="Download changes" aria-label="Download changes"><i class="fa-solid fa-download"></i></button>
     <span class="hint">Tip: tick/untick to enable/disable a menu path for the selected group.</span>
   </div>
 
@@ -173,7 +204,6 @@ let CURRENT_GROUP = null;
 let edits = {}; // { group: Set(paths) }
 let ALL_GROUPS = []; // full group list (sorted)
 let EXPANDED = new Set(); // expanded branch paths (persist across rerenders)
-let ALL_BRANCH_PATHS = []; // all branch node paths (nodes with children)
 
 
 function sortPaths(a,b){
@@ -258,7 +288,7 @@ function renderTree(){
         disableNodeAndDesc(node, getCurrentSet());
       }
       updateStatus();
-  renderTree();
+      renderTree();
     });
 
     const labelWrap=document.createElement('span');
@@ -276,7 +306,6 @@ function renderTree(){
       if(EXPANDED.has(node.path)) EXPANDED.delete(node.path);
       else EXPANDED.add(node.path);
       li.classList.toggle('collapsed');
-      syncExpandCollapseButton();
       console.log('Clicked:', node.name, 'path:', node.path);
     });
 
@@ -290,14 +319,14 @@ function renderTree(){
       const btnSelectAll=document.createElement('button');
       btnSelectAll.type='button';
       btnSelectAll.className='miniBtn';
-      btnSelectAll.innerHTML='✔';
+      btnSelectAll.innerHTML='<i class="fa-solid fa-check"></i>';
       btnSelectAll.title='Select all (enable all under this branch)';
       btnSelectAll.setAttribute('aria-label','Select all');
 
       const btnUnselectAll=document.createElement('button');
       btnUnselectAll.type='button';
       btnUnselectAll.className='miniBtn secondary';
-      btnUnselectAll.innerHTML='✖';
+      btnUnselectAll.innerHTML='<i class="fa-solid fa-xmark"></i>';
       btnUnselectAll.title='Unselect all (disable all under this branch)';
       btnUnselectAll.setAttribute('aria-label','Unselect all');
 
@@ -315,13 +344,13 @@ function renderTree(){
         const s=getCurrentSet();
         enableNodeAndDesc(node, s);
         updateStatus();
-  renderTree();
+        renderTree();
       });
 
       btnUnselectAll.addEventListener('click', ()=>{
         disableNodeAndDesc(node, getCurrentSet());
         updateStatus();
-  renderTree();
+        renderTree();
       });
 
       actions.appendChild(btnSelectAll);
@@ -391,30 +420,6 @@ function enableNodeAndDesc(node, set){
   (node.children||[]).forEach(ch=>enableNodeAndDesc(ch,set));
 }
 
-
-function collectBranchPaths(nodes, out){
-  (nodes || []).forEach(n => {
-    if(n.children && n.children.length){
-      out.push(n.path);
-      collectBranchPaths(n.children, out);
-    }
-  });
-}
-
-function isAllExpanded(){
-  if(!ALL_BRANCH_PATHS || ALL_BRANCH_PATHS.length === 0) return false;
-  for(const p of ALL_BRANCH_PATHS){
-    if(!EXPANDED.has(p)) return false;
-  }
-  return true;
-}
-
-function syncExpandCollapseButton(){
-  const btn = document.getElementById('toggleExpandCollapse');
-  if(!btn) return;
-  btn.textContent = isAllExpanded() ? 'Collapse all' : 'Expand all';
-}
-
 function expandCollapse(allCollapsed){
   if(allCollapsed){
     EXPANDED.clear();
@@ -431,7 +436,6 @@ function expandCollapse(allCollapsed){
     })(MENU_TREE);
   }
   renderTree();
-  syncExpandCollapseButton();
 }
 
 function downloadJson(){
@@ -470,10 +474,7 @@ function populateGroupSelect(filterText=''){
 }
 
 async function init(){
-  MENU_TREE = await fetch('menus_full.json').then(r=>r.json());
-  // Cache all branch paths (nodes that have children) for fast expand/collapse toggle
-  ALL_BRANCH_PATHS = [];
-  collectBranchPaths(MENU_TREE, ALL_BRANCH_PATHS);
+  MENU_TREE = await fetch('menus.json').then(r=>r.json());
   GROUP_ACCESS = await fetch('group_access.json').then(r=>r.json());
 
   const sel=document.getElementById('groupSelect');
@@ -482,7 +483,7 @@ async function init(){
   sel.addEventListener('change', ()=>{
     CURRENT_GROUP = sel.value;
     updateStatus();
-  renderTree();
+    renderTree();
   });
 
   // Group search (filters the dropdown in real time)
@@ -494,11 +495,11 @@ async function init(){
       // If filtering changed the selected group, refresh UI
       if(prev !== CURRENT_GROUP){
         updateStatus();
-  renderTree();
+        renderTree();
       }else{
         // still update status if CURRENT_GROUP became null (no matches)
         updateStatus();
-  renderTree();
+        renderTree();
       }
     });
     gf.addEventListener('keydown', (e)=>{
@@ -511,7 +512,7 @@ async function init(){
           CURRENT_GROUP = matches[0];
           populateGroupSelect(gf.value);
           updateStatus();
-  renderTree();
+          renderTree();
           sel.focus();
         }
       }
@@ -519,19 +520,15 @@ async function init(){
   }
 
   document.getElementById('search').addEventListener('input', renderTree);
-  document.getElementById('showDisabled').addEventListener('change', renderTree);
-  document.getElementById('toggleExpandCollapse').addEventListener('click', () => {
-    // Toggle behavior: default shows "Expand all".
-    // If currently fully expanded, collapse everything; otherwise expand everything.
-    if(isAllExpanded()) expandCollapse(true);
-    else expandCollapse(false);
-  });
-document.getElementById('download').addEventListener('click', downloadJson);
+  document.getElementById('showDisabled').addEventListener('change', renderTree); // <-- ADD THIS LINE
+  document.getElementById('expandAll').addEventListener('click', ()=>expandCollapse(false));  
+  document.getElementById('collapseAll').addEventListener('click', ()=>expandCollapse(true));
+  document.getElementById('download').addEventListener('click', downloadJson);
 
   updateStatus();
   renderTree();
-  syncExpandCollapseButton();
 }
+
 init();
 </script>
 </body>
